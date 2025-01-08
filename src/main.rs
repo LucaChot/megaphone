@@ -52,7 +52,6 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
     let (mut data_output, data_stream) = builder.new_output();
     let (mut latency_output, latency_stream) = builder.new_output();
 
-
     builder.build(move |mut _capability| {
       println!("Len {}",_capability.len());
       let mut notificator = TotalOrderFrontierNotificator::new();
@@ -65,6 +64,8 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
       }
       //}
 
+
+      drop(_capability);
 
       //capability = None;
 
@@ -85,14 +86,12 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
 
 
         notificator.for_each(&[&frontiers[0]], |cap, time, notificator| { 
+          //let temp = cap.delayed(&time);
           println!("Notified at {:?}", cap);
-          let temp = _capability[1].delayed(&time);
-          let mut session = latency_output.session(&temp);
+          let mut session = latency_output.session(&cap);
           let timestamp = SystemTime::now();
-          println!("Start epoch {:?} at {:?} time", temp, timestamp);
+          println!("Start epoch {:?} at {:?} time", time, timestamp);
           session.give(timestamp);
-          _capability[1].downgrade(&time);
-          _capability[0].downgrade(&time);
           if let Some(interval) = intervals.next() {
             let next = cap.delayed(&interval);
             notificator.notify_at(&next); 
