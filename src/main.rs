@@ -52,19 +52,21 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
     let (mut data_output, data_stream) = builder.new_output();
     let (mut latency_output, latency_stream) = builder.new_output();
 
-
     builder.build(move |mut _capability| {
       println!("Len {}",_capability.len());
       let mut notificator = TotalOrderFrontierNotificator::new();
       //let mut capability = Some(_capability);
       //if let Some(cap) = capability{
-      if let Some(interval) = intervals.next() {
-        let time = _capability[0].delayed(&interval);
-        notificator.notify_at(&time);
-        println!("To notify at {:?}", &time);
-      }
+      //if let Some(interval) = intervals.next() {
+        //let time = _capability[0].delayed(&interval);
+        //notificator.notify_at(&time);
+        //println!("To notify at {:?}", &time);
+      //}
       //}
 
+      let next_epoch = intervals.next();
+
+      drop(_capability);
 
       //capability = None;
 
@@ -78,6 +80,12 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
           //session.give_iterator(data.drain())
           data.swap(&mut data_vec);
           for d in data_vec.drain(..) {
+            if let Some(interval) = next_epoch.clone() {
+              if cap.time().eq(&interval) {
+                notificator.notify_at(&cap.delayed(&interval));
+              }
+
+            }
             println!("Recieved {:?} at {:?}", &d, &cap);
             session.give(d);
           }
@@ -85,14 +93,12 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
 
 
         notificator.for_each(&[&frontiers[0]], |cap, time, notificator| { 
-          println!("Notified at {:?}", cap);
-          let temp = _capability[1].delayed(&time);
+          let temp = cap.clone().delayed(&time);
+          println!("Notified at {:?}", temp);
           let mut session = latency_output.session(&temp);
           let timestamp = SystemTime::now();
           println!("Start epoch {:?} at {:?} time", temp, timestamp);
           session.give(timestamp);
-          _capability[1].downgrade(&time);
-          _capability[0].downgrade(&time);
           if let Some(interval) = intervals.next() {
             let next = cap.delayed(&interval);
             notificator.notify_at(&next); 
