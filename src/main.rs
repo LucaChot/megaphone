@@ -45,6 +45,7 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
 
   fn latency
     (&self, mut intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> (Stream<G, D>, Stream<G,SystemTime>) {
+    let index = self.scope().index();
     let mut builder = OperatorBuilder::new(String::from("Latency"), self.scope());
 
     let mut data_in = builder.new_input(self, Pipeline);
@@ -53,49 +54,35 @@ impl<G, D> LatencyOperator<G, D> for Stream<G, D>
     let (mut latency_output, latency_stream) = builder.new_output();
 
     builder.build(move |mut _capability| {
-      println!("Len {}",_capability.len());
       let mut notificator = TotalOrderFrontierNotificator::new();
-      //let mut capability = Some(_capability);
-      //if let Some(cap) = capability{
       if let Some(interval) = intervals.next() {
-        let time = _capability[0].delayed(&interval);
+        let time = _capability[1].delayed(&interval);
         notificator.notify_at(&time);
-        println!("To notify at {:?}", &time);
       }
-      //}
-
-
-      drop(_capability);
-
-      //capability = None;
 
       move |frontiers| {
         let mut data_out = data_output.activate();
         let mut latency_output = latency_output.activate();
+
         let mut data_vec = vec![];
 
         data_in.for_each(|cap, data |{ 
-          let mut session = data_out.session(&cap);
-          //session.give_iterator(data.drain())
+          let mut data_session = data_out.session(&cap);
           data.swap(&mut data_vec);
           for d in data_vec.drain(..) {
-            println!("Recieved {:?} at {:?}", &d, &cap);
-            session.give(d);
+            data_session.give(d);
           }
         });
 
 
         notificator.for_each(&[&frontiers[0]], |cap, time, notificator| { 
-          //let temp = cap.delayed(&time);
-          println!("Notified at {:?}", cap);
           let mut session = latency_output.session(&cap);
           let timestamp = SystemTime::now();
-          println!("Start epoch {:?} at {:?} time", time, timestamp);
+          println!("Worker {:?} finished receiving epoch {:?} at {:?}", index, time, timestamp);
           session.give(timestamp);
           if let Some(interval) = intervals.next() {
             let next = cap.delayed(&interval);
             notificator.notify_at(&next); 
-            println!("To notify at {:?}", &next);
           }
         });
       }
@@ -127,17 +114,14 @@ impl<G, D> ElapsedOperator<G, D> for Stream<G, D>
     (&self, latency_stream: &Stream<G,SystemTime>, mut intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> Stream<G,Duration> {
 
     self.binary_frontier(latency_stream, Pipeline, Pipeline, "Elapsed", |mut _capability, _info| {
+      let index = self.scope().index();
       let mut notificator = TotalOrderFrontierNotificator::new();
-      let mut capability = Some(_capability);
-      if let Some(cap) = capability{
-        if let Some(interval) = intervals.next() {
-          let time = cap.delayed(&interval);
-          notificator.notify_at(&time);
-          println!("To notify at {:?}", &time);
-        }
-      }
 
-      capability = None;
+      if let Some(interval) = intervals.next() {
+        let time = _capability.delayed(&interval);
+        notificator.notify_at(&time);
+        //println!("To notify at {:?}", &time);
+      }
       
       let mut starts = VecDeque::new();
       move |input1, input2, output| {
@@ -153,6 +137,9 @@ impl<G, D> ElapsedOperator<G, D> for Stream<G, D>
           }
         });
         */
+
+        while let Some((_, _)) = input1.next() {}
+
         while let Some((_, start)) = input2.next() {
           let mut data_vec = vec![];
           start.swap(&mut data_vec);
@@ -163,20 +150,19 @@ impl<G, D> ElapsedOperator<G, D> for Stream<G, D>
         }
 
 
-        notificator.for_each(&[input1.frontier()], |cap, _, notificator| { 
+        notificator.for_each(&[input1.frontier()], |cap, time, notificator| { 
           let mut session = output.session(&cap);
           let end = SystemTime::now();
-          println!("Finish epoch {:?} at {:?} time", cap, end);
           if let Some(start) = starts.pop_front() {
+            println!("Worker {:?}  epoch {:?} start time: {:?}", index, time, start);
+            println!("Worker {:?} epoch {:?} end time {:?}", index, time, end);
             if let Ok(elapsed_time) = end.duration_since(start) {
               session.give(elapsed_time);
             }
           }
-
           if let Some(interval) = intervals.next() {
             let time = cap.delayed(&interval);
             notificator.notify_at(&time); 
-            println!("To notify at {:?}", &time);
           }
         });
       }
@@ -209,25 +195,29 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
     
     data_stream
       .inspect(move |x| { 
-        println!("Waiting time: {:?}", x);
-        thread::sleep(Duration::from_secs(*x));
+        if index == 0 {
+          println!("Worker {:?} spent time: {:?}", index, x);
+          thread::sleep(Duration::from_secs(*x));
+        } else {
+          println!("Worker {:?} spent time: 0", index);
+          thread::sleep(Duration::from_secs(0));
+        }
       })
-      .probe_with(&mut probe);
-      //.elapsed(&latency_stream, Box::from(iter::from_fn(move || {
-        ////let result = current;
-        //current += base;
-        //Some(result)
-      //})))
-     latency_stream 
+     .elapsed(&latency_stream, Box::from(iter::from_fn(move || {
+        let result = current;
+        current += base;
+        Some(result)
+      })))
+      .probe_with(&mut probe)
       .inspect(move |x| { 
-        println!("Elapsed time: {:?}", x);
+        println!("Worker {:?} elapsed time: {:?}", index, x);
       });
   });
 
   println!("Complete Graph"); 
   for round in 0..10 { 
-    if index == 0 { 
-      println!("Sent round: {}", round);
+    if round % 2 == index as u64 { 
+      println!("Worker {} sent round: {}", index, round);
       input.send(round); 
     }
     input.advance_to(round + 1); 
@@ -237,6 +227,6 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
   } 
   println!("Finished sending"); 
   worker.step(); 
-  panic!();
+  //panic!();
 
   }).unwrap(); }
