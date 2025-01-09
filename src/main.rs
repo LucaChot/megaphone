@@ -1,176 +1,12 @@
-use std::{time::{SystemTime, Duration}, thread, iter, collections::VecDeque}; extern crate timely; extern crate dynamic_scaling_mechanism;
+use std::{time::{SystemTime, Duration}, thread, iter, collections::VecDeque}; 
+extern crate timely; 
+extern crate dynamic_scaling_mechanism;
 
-use dynamic_scaling_mechanism::notificator::TotalOrderFrontierNotificator; use
-timely::{Configuration, dataflow::{InputHandle, ProbeHandle, channels::pact::Pipeline,
-operators::{Input, Operator, Inspect, Probe, Partition}}, order::TotalOrder, progress::Timestamp};
+use dynamic_scaling_mechanism::Control; 
+use timely::{Configuration, dataflow::{InputHandle, ProbeHandle,
+operators::{Input, Inspect, Probe, Partition}}, order::TotalOrder, progress::Timestamp};
 
-use timely::ExchangeData;
-use timely::dataflow::{Stream, Scope};
-use timely::communication::message::RefOrMut;
-use timely::dataflow::channels::pact::Exchange;
-use timely::dataflow::channels::pushers::Tee;
-use timely::dataflow::operators::{ConnectLoop, Filter, Map};
-use timely::dataflow::operators::generic::builder_rc::OperatorBuilder;
-use timely::Data;
-use timely::dataflow::operators::Capability;
-use timely::dataflow::operators::generic::OutputHandle;
-
-use dynamic_scaling_mechanism::{Bin, Control, Key, State};
-//use dynamic_scaling_mechanism::stateful::{Stateful, apply_state_updates, Notificator};
-use dynamic_scaling_mechanism::notificator::{Notify};
-
-#[derive(Clone, Debug)]
-pub enum LatencyStream<T> {
-  Timestamp(SystemTime),
-  Data(T)
-}
-pub trait LatencyOperator<G, D>
-    where
-        G: Scope,
-        G::Timestamp: TotalOrder,
-        D: ExchangeData + Eq,
-{
-    /// Stateful operator with a single input.
-    fn latency 
-      (&self, intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> (Stream<G, D>, Stream<G,SystemTime>) ;
-}
-
-impl<G, D> LatencyOperator<G, D> for Stream<G, D>
-    where
-        G: Scope, // The containing scope
-        G::Timestamp: TotalOrder,
-        D: ExchangeData+Eq + std::fmt::Debug, // Input data
-{
-    /// Stateful operator with a single input and input transformation.
-
-  fn latency
-    (&self, mut intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> (Stream<G, D>, Stream<G,SystemTime>) {
-    let index = self.scope().index();
-    let mut builder = OperatorBuilder::new(String::from("Latency"), self.scope());
-
-    let mut data_in = builder.new_input(self, Pipeline);
-    
-    let (mut data_output, data_stream) = builder.new_output();
-    let (mut latency_output, latency_stream) = builder.new_output();
-
-    builder.build(move |mut _capability| {
-      let mut notificator = TotalOrderFrontierNotificator::new();
-      if let Some(interval) = intervals.next() {
-        let time = _capability[1].delayed(&interval);
-        notificator.notify_at(&time);
-      }
-
-      move |frontiers| {
-        let mut data_out = data_output.activate();
-        let mut latency_output = latency_output.activate();
-
-        let mut data_vec = vec![];
-
-        data_in.for_each(|cap, data |{ 
-          let mut data_session = data_out.session(&cap);
-          data.swap(&mut data_vec);
-          for d in data_vec.drain(..) {
-            data_session.give(d);
-          }
-        });
-
-
-        notificator.for_each(&[&frontiers[0]], |cap, time, notificator| { 
-          let mut session = latency_output.session(&cap);
-          let timestamp = SystemTime::now();
-          println!("Worker {:?} finished receiving epoch {:?} at {:?}", index, time, timestamp);
-          session.give(timestamp);
-          if let Some(interval) = intervals.next() {
-            let next = cap.delayed(&interval);
-            notificator.notify_at(&next); 
-          }
-        });
-      }
-    });
-    (data_stream, latency_stream)
-  }
-}
-
-pub trait ElapsedOperator<G, D>
-    where
-        G: Scope,
-        G::Timestamp: TotalOrder,
-        D: ExchangeData + Eq,
-{
-    /// Stateful operator with a single input.
-    fn elapsed 
-      (&self, latency_stream: &Stream<G,SystemTime>, intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> Stream<G,Duration> ;
-}
-
-impl<G, D> ElapsedOperator<G, D> for Stream<G, D>
-    where
-        G: Scope, // The containing scope
-        G::Timestamp: TotalOrder,
-        D: ExchangeData+Eq + std::fmt::Debug, // Input data
-{
-    /// Stateful operator with a single input and input transformation.
-
-  fn elapsed
-    (&self, latency_stream: &Stream<G,SystemTime>, mut intervals: Box<dyn Iterator<Item=<G>::Timestamp>>) -> Stream<G,Duration> {
-
-    self.binary_frontier(latency_stream, Pipeline, Pipeline, "Elapsed", |mut _capability, _info| {
-      let index = self.scope().index();
-      let mut notificator = TotalOrderFrontierNotificator::new();
-
-      if let Some(interval) = intervals.next() {
-        let time = _capability.delayed(&interval);
-        notificator.notify_at(&time);
-        //println!("To notify at {:?}", &time);
-      }
-      
-      let mut starts = VecDeque::new();
-      move |input1, input2, output| {
-
-        /*
-        input1.for_each(|cap, data |{ 
-          let mut session = output.session(&cap);
-          //session.give_iterator(data.drain())
-          data.swap(&mut data_vec);
-          for d in data_vec.drain(..) {
-            println!("Recieved {:?} at {:?}", &d, &cap);
-            session.give(d);
-          }
-        });
-        */
-
-        while let Some((_, _)) = input1.next() {}
-
-        while let Some((_, start)) = input2.next() {
-          let mut data_vec = vec![];
-          start.swap(&mut data_vec);
-
-          for data in data_vec {
-            starts.push_back(data)
-          }
-        }
-
-
-        notificator.for_each(&[input1.frontier()], |cap, time, notificator| { 
-          let mut session = output.session(&cap);
-          let end = SystemTime::now();
-          if let Some(start) = starts.pop_front() {
-            println!("Worker {:?}  epoch {:?} start time: {:?}", index, time, start);
-            println!("Worker {:?} epoch {:?} end time {:?}", index, time, end);
-            if let Ok(elapsed_time) = end.duration_since(start) {
-              session.give(elapsed_time);
-            }
-          }
-          if let Some(interval) = intervals.next() {
-            let time = cap.delayed(&interval);
-            notificator.notify_at(&time); 
-          }
-        });
-      }
-    })
-  }
-}
-
-//impl<T: timely::Data> timely::Data for LatencyStream<T> {}
+use dynamic_scaling_mechanism::latency_operator::StatefulLatencyOperator;
 
 
 fn main() { println!("Test started"); timely::execute(Configuration::Process(2), |worker| {
@@ -179,47 +15,42 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
   // within a timestamp. let mut result = vec![(0, 0), (0, 2), (0, 6), (0, 12), (0, 20), (1, 1),
   // (1, 4), (1, 9), (1, 16), (1, 25)];
 
-  let index = worker.index(); let mut input = InputHandle::new(); let mut probe =
-    ProbeHandle::new();
+  let index = worker.index(); 
+  let mut input = InputHandle::new(); 
+  let mut control = InputHandle::new(); 
+  let mut probe = ProbeHandle::new();
 
   worker.dataflow::<u64,_,_>(|scope| { 
     let input = scope.input_from::<u64>(&mut input);
-    let base = 1;
-    let mut current = 0;
-    let (data_stream, latency_stream) = input.latency(Box::from(iter::from_fn(move || {
-      let result = current;
-      current += base;
-      Some(result)
-    })));
-    
-    
-    data_stream
-      .inspect(move |x| { 
-        if index == 0 {
-          println!("Worker {:?} spent time: {:?}", index, x);
-          thread::sleep(Duration::from_secs(*x));
-        } else {
-          println!("Worker {:?} spent time: 0", index);
-          thread::sleep(Duration::from_secs(0));
+    let control = scope.input_from::<Control>(&mut control);
+
+    let (data_stream, latency_stream) = input.stateful_latency(
+      &control,
+      |k : &u64| k.clone(),
+      "Simulate latency",
+      move |cap, data, output| {
+        for (time, d) in data.drain(..) {
+          if index == 0 {
+            thread::sleep(Duration::from_secs(d));
+          } else {
+            thread::sleep(Duration::from_secs(d / 2));
+          }
+          let t = &cap.delayed(&time);
+          let mut session = output.session(&t); 
+          session.give(d);
         }
-      })
-     .elapsed(&latency_stream, Box::from(iter::from_fn(move || {
-        let result = current;
-        current += base;
-        Some(result)
-      })))
-      .probe_with(&mut probe)
+      }
+    );
+    data_stream.probe_with(&mut probe);
+
+    latency_stream
       .inspect(move |x| { 
         println!("Worker {:?} elapsed time: {:?}", index, x);
       });
   });
 
-  println!("Complete Graph"); 
   for round in 0..10 { 
-    if round % 2 == index as u64 { 
-      println!("Worker {} sent round: {}", index, round);
-      input.send(round); 
-    }
+    input.send(round); 
     input.advance_to(round + 1); 
     while probe.less_than(input.time()) {
       worker.step(); 
@@ -227,6 +58,5 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
   } 
   println!("Finished sending"); 
   worker.step(); 
-  //panic!();
-
   }).unwrap(); }
+

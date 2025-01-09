@@ -7,6 +7,7 @@ extern crate abomonation;
 #[macro_use] extern crate abomonation_derive;
 
 mod stateful;
+pub mod latency_operator;
 pub mod state_machine;
 pub mod join;
 pub mod notificator;
