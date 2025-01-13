@@ -1,12 +1,13 @@
-use std::{time::{SystemTime, Duration}, thread, iter, collections::VecDeque}; 
+use std::{time::Duration, thread}; 
 extern crate timely; 
 extern crate dynamic_scaling_mechanism;
 
-use dynamic_scaling_mechanism::Control; 
+use dynamic_scaling_mechanism::{Control, Bin, BIN_SHIFT, ControlInst}; 
 use timely::{Configuration, dataflow::{InputHandle, ProbeHandle,
-operators::{Input, Inspect, Probe, Partition}}, order::TotalOrder, progress::Timestamp};
+operators::{Input, Inspect, Probe, Broadcast, Feedback, ConnectLoop, Delay}}};
 
 use dynamic_scaling_mechanism::latency_operator::StatefulLatencyOperator;
+use dynamic_scaling_mechanism::regulator::RegulateOperator;
 
 
 fn main() { println!("Test started"); timely::execute(Configuration::Process(2), |worker| {
@@ -17,23 +18,25 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
 
   let index = worker.index(); 
   let mut input = InputHandle::new(); 
-  let mut control = InputHandle::new(); 
   let mut probe = ProbeHandle::new();
 
   worker.dataflow::<u64,_,_>(|scope| { 
     let input = scope.input_from::<u64>(&mut input);
-    let control = scope.input_from::<Control>(&mut control);
 
-    let (data_stream, latency_stream) = input.stateful_latency(
-      &control,
+    let (feedback_handle, feedback_stream) = scope.feedback(1 as u64);
+    //let mut control_handle = InputHandle::new(); 
+    //let control = scope.input_from::<Control>(&mut control_handle);
+
+    let (data_stream, latency_stream, config) = input.stateful_latency(
+      &feedback_stream.broadcast(),
       |k : &u64| k.clone(),
       "Simulate latency",
-      move |cap, data, output| {
+      move |cap, data, _ : &mut Bin<_,Vec<()>, _>, output| {
         for (time, d) in data.drain(..) {
           if index == 0 {
-            thread::sleep(Duration::from_secs(d));
+            //thread::sleep(Duration::from_secs(d));
           } else {
-            thread::sleep(Duration::from_secs(d / 2));
+            //thread::sleep(Duration::from_secs(d / 2));
           }
           let t = &cap.delayed(&time);
           let mut session = output.session(&t); 
@@ -41,6 +44,16 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
         }
       }
     );
+  
+    
+
+
+    let control = latency_stream
+      .delay_batch(|time| time + 1)
+      .regulate_latency(config);
+
+    control.connect_loop(feedback_handle);
+
     data_stream.probe_with(&mut probe);
 
     latency_stream
@@ -50,12 +63,14 @@ fn main() { println!("Test started"); timely::execute(Configuration::Process(2),
   });
 
   for round in 0..10 { 
-    input.send(round); 
-    input.advance_to(round + 1); 
-    while probe.less_than(input.time()) {
-      worker.step(); 
-    } 
-  } 
+      if index == 0 {
+          input.send(round);
+      }
+      input.advance_to(round + 1);
+      while probe.less_than(input.time()) {
+          worker.step();
+      }
+  }
   println!("Finished sending"); 
   worker.step(); 
   }).unwrap(); }

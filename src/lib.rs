@@ -4,9 +4,12 @@
 extern crate fnv;
 extern crate timely;
 extern crate abomonation;
+extern crate rand;
 #[macro_use] extern crate abomonation_derive;
 
 mod stateful;
+pub mod map_stateful;
+pub mod regulator;
 pub mod latency_operator;
 pub mod state_machine;
 pub mod join;
